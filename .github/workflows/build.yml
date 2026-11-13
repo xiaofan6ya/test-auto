@@ -107,6 +107,15 @@ jobs:
           make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
                CROSS_COMPILE=aarch64-linux-gnu- prepare modules_prepare -j$(nproc)
 
+      - name: 生成 selinux 生成头（flask.h / av_permissions.h）
+        run: |
+          set -e
+          cd kernel
+          export PATH="$TCBIN:$PATH"
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-gnu- security/selinux/ -j$(nproc)
+          ls -l out/security/selinux/flask.h out/security/selinux/av_permissions.h
+
       - name: 快速验证：只编译 kernelsu 驱动
         run: |
           set -e
