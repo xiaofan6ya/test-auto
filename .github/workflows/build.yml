@@ -152,6 +152,38 @@ jobs:
           grep -q '^CONFIG_LOCALVERSION="-gaa24d707761c"' out/.config || { echo "!! LOCALVERSION 未锁定"; exit 1; }
           grep -q '^# CONFIG_LOCALVERSION_AUTO is not set' out/.config || { echo "!! LOCALVERSION_AUTO 未关闭"; exit 1; }
 
+      - name: 诊断补丁：模块加载失败时打印真实原因
+        run: |
+          set -e
+          python3 - <<'PY'
+          import re
+          p = "kernel/kernel/module.c"
+          src = open(p, encoding="utf-8", errors="replace").read()
+          if "MIRAI_DIAG" in src:
+              print("已打过诊断补丁")
+          else:
+              # 1) try_to_force_load 打印原因（原本在 FORCE_LOAD 关闭时静默返回 -ENOEXEC）
+              m = re.search(r"static int try_to_force_load\s*\([^)]*\)\s*\n?\s*\{", src)
+              if m:
+                  ins = '\n\tpr_err("MIRAI_DIAG: try_to_force_load(%s): %s\\n", mod->name, reason);\n'
+                  src = src[:m.end()] + ins + src[m.end():]
+                  print("已插入 try_to_force_load 诊断")
+              else:
+                  print("!! 未找到 try_to_force_load")
+              # 2) check_modinfo 进入时打印 modmagic 与内核 vermagic
+              m2 = re.search(r"static int check_modinfo\s*\([^)]*\)\s*\n?\s*\{", src)
+              if m2:
+                  ins2 = ('\n\t{ const char *dbg = get_modinfo(info, "vermagic");\n'
+                          '\t  pr_err("MIRAI_DIAG: check_modinfo %s modmagic=[%s] vermagic=[%s]\\n",\n'
+                          '\t\t info->name ? info->name : "?", dbg ? dbg : "(null)", vermagic); }\n')
+                  src = src[:m2.end()] + ins2 + src[m2.end():]
+                  print("已插入 check_modinfo 诊断")
+              else:
+                  print("!! 未找到 check_modinfo")
+              open(p, "w", encoding="utf-8", newline="\n").write(src)
+          PY
+          grep -n 'MIRAI_DIAG' kernel/kernel/module.c
+
       - name: 生成构建头（prepare）
         run: |
           set -e
