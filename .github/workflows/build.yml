@@ -32,8 +32,8 @@ jobs:
     env:
       ARCH: arm64
       TARGET_VERMAGIC: '4.14.186-gaa24d707761c SMP preempt mod_unload modversions aarch64'
-      KREPO: 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git'
-      KBRANCH: 'chopin-r-oss'
+      KREPO: 'https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S.git'
+      KBRANCH: 'S'
 
     steps:
       - name: 检出
@@ -98,6 +98,27 @@ jobs:
           sed -i 's/>&2 && exit 1/>\&2 || true/' "$f"
           echo "--- 剩余 exit 1 检查 ---"
           grep -n 'exit 1' "$f" || echo "(已全部放宽)"
+
+      - name: 跳过 modversions 逐符号 CRC 校验（vendor 模块 CRC 与公开源码树对不齐）
+        run: |
+          set -e
+          python3 - <<'PY'
+          import re
+          p = "kernel/kernel/module.c"
+          src = open(p, encoding="utf-8", errors="replace").read()
+          if "MIRAI_SKIP_CRC_CHECK" in src:
+              print("已打过补丁")
+          else:
+              m = re.search(r"static\s+int\s+check_version\s*\([^)]*\)\s*\n?\s*\{", src)
+              if not m:
+                  raise SystemExit("未找到 check_version 定义")
+              patch = ("\n\t/* MIRAI_SKIP_CRC_CHECK: 跳过 __versions 逐符号 CRC 比对，"
+                       "vermagic 仍在 check_modinfo 里校验 */\n\treturn 1;\n")
+              src = src[:m.end()] + patch + src[m.end():]
+              open(p, "w", encoding="utf-8", newline="\n").write(src)
+              print("已在 check_version 插入短路 return 1")
+          PY
+          grep -n 'MIRAI_SKIP_CRC_CHECK' kernel/kernel/module.c
 
       - name: 修补内核树已知笔误（mrdump-objs 取了未定义的 -n 变量）
         run: |
@@ -191,6 +212,11 @@ jobs:
           cd kernel
           echo "===== autoconf.h ====="
           grep -E 'CONFIG_MODULE_UNLOAD|CONFIG_MODVERSIONS|CONFIG_SMP|CONFIG_PREEMPT' out/include/generated/autoconf.h || echo "(autoconf 里没有)"
+          echo
+          echo "===== module.o 对象里的关键字符串 ====="
+          for s in "version magic" "mod_unload" "modversions" "disagrees about version" "MIRAI_SKIP"; do
+            printf '  %-26s %s\n' "$s" "$(strings -a out/kernel/module.o 2>/dev/null | grep -c "$s" || echo 0)"
+          done
           echo
           echo "===== vmlinux 里的 vermagic 字符串 ====="
           strings -a out/vmlinux | grep -E '4\.14\.186-gaa24d707761c' | head -5 || echo "(vmlinux 未命中)"
