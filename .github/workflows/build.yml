@@ -44,30 +44,22 @@ jobs:
           # 去掉 .git：避免 setlocalversion 给 vermagic 追加 -dirty / +
           rm -rf .git
 
-      - name: 准备工具链（proton-clang 优先，apt clang 兜底）
+      - name: 准备工具链（apt clang-12，对齐原厂 clang-r383902）
         run: |
           set -e
-          TC="$GITHUB_WORKSPACE/tc"
-          mkdir -p "$TC/bin"
-          OK=0
-          if git clone --depth 1 -q https://github.com/kdrag0n/proton-clang.git "$TC/proton" 2>/dev/null \
-             && [ -x "$TC/proton/bin/clang" ]; then
-            echo "toolchain = proton-clang"
-            echo "TCBIN=$TC/proton/bin" >> "$GITHUB_ENV"
-            OK=1
-          fi
-          if [ "$OK" -eq 0 ]; then
-            echo "toolchain = apt clang-12 + gcc-aarch64-linux-gnu"
-            sudo apt-get install -y -qq clang-12 lld-12 llvm-12 gcc-aarch64-linux-gnu
-            for t in clang clang++ ld.lld lld llvm-ar llvm-nm llvm-objcopy llvm-strip llvm-objdump; do
-              if [ -e "/usr/bin/$t-12" ]; then src="/usr/bin/$t-12"; else src="/usr/bin/$t"; fi
-              ln -sf "$src" "$TC/bin/$(basename "$t")"
-            done
-            echo "TCBIN=$TC/bin" >> "$GITHUB_ENV"
-          fi
-          export PATH="$TCBIN:$PATH"
+          sudo apt-get install -y -qq clang-12 lld-12 llvm-12 gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          TC="$GITHUB_WORKSPACE/tc/bin"
+          mkdir -p "$TC"
+          for t in clang clang++ ld.lld lld llvm-ar llvm-nm llvm-objcopy llvm-strip llvm-objdump; do
+            if [ -e "/usr/bin/$t-12" ]; then src="/usr/bin/$t-12"; else src="/usr/bin/$t"; fi
+            ln -sf "$src" "$TC/$(basename "$t")"
+          done
+          echo "TCBIN=$TC" >> "$GITHUB_ENV"
+          export PATH="$TC:$PATH"
           clang --version | head -2
-          which aarch64-linux-gnu-gcc aarch64-linux-gnu-ld || true
+          aarch64-linux-gnu-gcc --version | head -1
+          aarch64-linux-gnu-elfedit --version | head -1
+          which ld.lld llvm-ar llvm-objcopy
 
       - name: 解包 payload 并集成 KernelSU v0.9.5
         run: |
