@@ -1,0 +1,160 @@
+name: Build chopin KernelSU kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'full = 完整 Image.gz；check = 只编译 kernelsu 驱动（快速验证）'
+        required: false
+        default: 'full'
+      make_target:
+        description: '覆盖构建目标（留空用 mode 决定）'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+
+    env:
+      ARCH: arm64
+      TARGET_VERMAGIC: '4.14.186-gaa24d707761c SMP preempt mod_unload modversions aarch64'
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 基础依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev rsync zip unzip cpio python3
+
+      - name: 拉取 chopin 内核源码（4.14.186 基线）
+        run: |
+          git clone --depth 1 --branch S https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S.git kernel
+          cd kernel
+          git log -1 --format='HEAD %H %s'
+          grep -m1 '^VERSION\|^PATCHLEVEL\|^SUBLEVEL' Makefile || true
+          make kernelversion
+          # 去掉 .git：避免 setlocalversion 给 vermagic 追加 -dirty / +
+          rm -rf .git
+
+      - name: 准备工具链（proton-clang 优先，apt clang 兜底）
+        run: |
+          set -e
+          TC="$GITHUB_WORKSPACE/tc"
+          mkdir -p "$TC/bin"
+          OK=0
+          if git clone --depth 1 -q https://github.com/kdrag0n/proton-clang.git "$TC/proton" 2>/dev/null \
+             && [ -x "$TC/proton/bin/clang" ]; then
+            echo "toolchain = proton-clang"
+            echo "TCBIN=$TC/proton/bin" >> "$GITHUB_ENV"
+            OK=1
+          fi
+          if [ "$OK" -eq 0 ]; then
+            echo "toolchain = apt clang-12 + gcc-aarch64-linux-gnu"
+            sudo apt-get install -y -qq clang-12 lld-12 llvm-12 gcc-aarch64-linux-gnu
+            for t in clang clang++ ld.lld lld llvm-ar llvm-nm llvm-objcopy llvm-strip llvm-objdump; do
+              if [ -e "/usr/bin/$t-12" ]; then src="/usr/bin/$t-12"; else src="/usr/bin/$t"; fi
+              ln -sf "$src" "$TC/bin/$(basename "$t")"
+            done
+            echo "TCBIN=$TC/bin" >> "$GITHUB_ENV"
+          fi
+          export PATH="$TCBIN:$PATH"
+          clang --version | head -2
+          which aarch64-linux-gnu-gcc aarch64-linux-gnu-ld || true
+
+      - name: 解包 payload 并集成 KernelSU v0.9.5
+        run: |
+          set -e
+          tar xzf payload.tar.gz
+          tar xzf ksu095.tar.gz -C kernel/drivers
+          printf '\nobj-$(CONFIG_KSU)\t\t+= kernelsu/\n' >> kernel/drivers/Makefile
+          sed -i 's/^endmenu$/source "drivers\/kernelsu\/Kconfig"\n\nendmenu/' kernel/drivers/Kconfig
+          cp kernel_config kernel/.config
+          echo "--- drivers/Makefile tail ---"
+          tail -3 kernel/drivers/Makefile
+          echo "--- drivers/Kconfig tail ---"
+          tail -5 kernel/drivers/Kconfig
+          echo "--- kernelsu tree ---"
+          ls kernel/drivers/kernelsu | head -30
+
+      - name: 配置（锁 vermagic，保证 vendor 模块可加载）
+        run: |
+          set -e
+          cd kernel
+          sed -i 's/^CONFIG_LOCALVERSION_AUTO=y$/# CONFIG_LOCALVERSION_AUTO is not set/' .config
+          sed -i 's/^CONFIG_LOCALVERSION=.*$/CONFIG_LOCALVERSION="-gaa24d707761c"/' .config
+          grep -q '^CONFIG_LOCALVERSION="-gaa24d707761c"$' .config || echo 'CONFIG_LOCALVERSION="-gaa24d707761c"' >> .config
+          grep -q '^CONFIG_LOCALVERSION_AUTO=' .config && sed -i 's/^CONFIG_LOCALVERSION_AUTO=.*$/# CONFIG_LOCALVERSION_AUTO is not set/' .config || true
+          mkdir -p out
+          mv .config out/.config
+          export PATH="$TCBIN:$PATH"
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-gnu- \
+               KCFLAGS=-Wno-error olddefconfig
+          echo "=== 关键配置 ==="
+          grep -E '^CONFIG_(KSU|KPROBES|OVERLAY_FS|MODULES|MODVERSIONS|KALLSYMS|PREEMPT|SMP|LOCALVERSION)' out/.config
+          echo "=== 校验 ==="
+          grep -q '^CONFIG_KSU=y' out/.config || { echo "!! CONFIG_KSU 未启用"; exit 1; }
+          grep -q '^CONFIG_OVERLAY_FS=y' out/.config || { echo "!! CONFIG_OVERLAY_FS 未启用"; exit 1; }
+          grep -q '^CONFIG_KPROBES=y' out/.config || { echo "!! CONFIG_KPROBES 未启用"; exit 1; }
+          grep -q '^CONFIG_LOCALVERSION="-gaa24d707761c"' out/.config || { echo "!! LOCALVERSION 未锁定"; exit 1; }
+          grep -q '^# CONFIG_LOCALVERSION_AUTO is not set' out/.config || { echo "!! LOCALVERSION_AUTO 未关闭"; exit 1; }
+
+      - name: 生成构建头（prepare）
+        run: |
+          set -e
+          cd kernel
+          export PATH="$TCBIN:$PATH"
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-gnu- prepare modules_prepare -j$(nproc)
+
+      - name: 快速验证：只编译 kernelsu 驱动
+        run: |
+          set -e
+          cd kernel
+          export PATH="$TCBIN:$PATH"
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-gnu- drivers/kernelsu/ -j$(nproc)
+          echo "KSU 驱动对象编译通过"
+          find out/drivers/kernelsu -name '*.o' | head -20
+
+      - name: 构建 Image.gz
+        if: ${{ github.event.inputs.mode != 'check' }}
+        run: |
+          set -e
+          cd kernel
+          export PATH="$TCBIN:$PATH"
+          TARGET="${{ github.event.inputs.make_target }}"
+          [ -n "$TARGET" ] || TARGET="Image.gz"
+          echo "构建目标: $TARGET"
+          time make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-gnu- "$TARGET" -j$(nproc)
+          ls -l out/arch/arm64/boot/
+
+      - name: 校验产物（版本串 / vermagic）
+        if: ${{ github.event.inputs.mode != 'check' }}
+        run: |
+          set -e
+          IMG=kernel/out/arch/arm64/boot/Image.gz
+          test -f "$IMG"
+          ls -l "$IMG"
+          echo "=== 版本串 ==="
+          gunzip -c "$IMG" | strings | grep -m3 'Linux version 4.14.186' || true
+          echo "=== 期望 vermagic: $TARGET_VERMAGIC ==="
+          gunzip -c "$IMG" | strings | grep -m3 -F "$TARGET_VERMAGIC" || echo "!! 未在 Image 里找到期望 vermagic（可能被压缩/未被 strings 命中）"
+
+      - name: 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chopin-ksu-${{ github.run_number }}
+          path: |
+            kernel/out/arch/arm64/boot/Image.gz
+            kernel/out/.config
+            kernel/out/Module.symvers
+            kernel/out/System.map
+          if-no-files-found: warn
+          retention-days: 30
