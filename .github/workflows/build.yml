@@ -76,6 +76,15 @@ jobs:
           echo "--- kernelsu tree ---"
           ls kernel/drivers/kernelsu | head -30
 
+      - name: 修补内核树已知笔误（mrdump-objs 取了未定义的 -n 变量）
+        run: |
+          set -e
+          f=kernel/drivers/misc/mediatek/aee/mrdump/Makefile
+          if grep -q 'mrdump-objs := $(mrdump-objs-n)' "$f"; then
+            sed -i 's/mrdump-objs := \$(mrdump-objs-n)/mrdump-objs := $(mrdump-objs-y)/' "$f"
+            echo "已修正：$(grep -n 'mrdump-objs' "$f" | tail -1)"
+          fi
+
       - name: 配置（锁 vermagic，保证 vendor 模块可加载）
         run: |
           set -e
@@ -129,15 +138,29 @@ jobs:
       - name: 构建 Image.gz
         if: ${{ github.event.inputs.mode != 'check' }}
         run: |
-          set -e
           cd kernel
           export PATH="$TCBIN:$PATH"
           TARGET="${{ github.event.inputs.make_target }}"
           [ -n "$TARGET" ] || TARGET="Image.gz"
-          echo "构建目标: $TARGET"
-          time make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
-               CROSS_COMPILE=aarch64-linux-gnu- "$TARGET" -j$(nproc)
-          ls -l out/arch/arm64/boot/
+          echo "构建目标: $TARGET（-k 继续编译，一轮收全部错误）"
+          set +e
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-gnu- "$TARGET" -k -j$(nproc) 2>&1 | tee ../build.log
+          echo "make exit: ${PIPESTATUS[0]}"
+          set -e
+          ls -l out/arch/arm64/boot/ 2>/dev/null || true
+
+      - name: 汇总构建错误
+        if: ${{ github.event.inputs.mode != 'check' }}
+        run: |
+          cd kernel
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            echo "Image.gz 已生成：$(ls -l out/arch/arm64/boot/Image.gz)"
+          else
+            echo "=== 错误汇总 ==="
+            grep -nE 'error:|Error [0-9]+|No rule to make target' ../build.log | head -100 || true
+            exit 1
+          fi
 
       - name: 校验产物（版本串 / vermagic）
         if: ${{ github.event.inputs.mode != 'check' }}
@@ -161,5 +184,6 @@ jobs:
             kernel/out/.config
             kernel/out/Module.symvers
             kernel/out/System.map
+            build.log
           if-no-files-found: warn
           retention-days: 30
