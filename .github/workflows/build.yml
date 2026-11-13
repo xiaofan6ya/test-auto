@@ -162,6 +162,24 @@ jobs:
             exit 1
           fi
 
+      - name: 诊断 vermagic（vmlinux / Image / autoconf 三处对照）
+        if: ${{ github.event.inputs.mode != 'check' }}
+        run: |
+          cd kernel
+          echo "===== autoconf.h ====="
+          grep -E 'CONFIG_MODULE_UNLOAD|CONFIG_MODVERSIONS|CONFIG_SMP|CONFIG_PREEMPT' out/include/generated/autoconf.h || echo "(autoconf 里没有)"
+          echo
+          echo "===== vmlinux 里的 vermagic 字符串 ====="
+          strings -a out/vmlinux | grep -E '4\.14\.186-gaa24d707761c' | head -5 || echo "(vmlinux 未命中)"
+          echo "mod_unload 计数: $(strings -a out/vmlinux | grep -c mod_unload || true)"
+          echo "modversions 计数: $(strings -a out/vmlinux | grep -c modversions || true)"
+          echo
+          echo "===== Image 里的 vermagic 字符串 ====="
+          strings -a out/arch/arm64/boot/Image | grep -E '4\.14\.186-gaa24d707761c.*(SMP|preempt)' | head -5 || echo "(Image 未命中带 SMP/preempt 的版本串)"
+          echo
+          echo "===== System.map 里 kcrctab 区间 ====="
+          grep -E '__start___kcrctab|__stop___kcrctab' out/System.map | head -8
+
       - name: 校验产物（版本串 / vermagic）
         if: ${{ github.event.inputs.mode != 'check' }}
         run: |
