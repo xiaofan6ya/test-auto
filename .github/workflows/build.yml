@@ -1,6 +1,10 @@
 name: Build chopin KernelSU kernel
 
 on:
+  push:
+    branches:
+      - chopin-ksu-kernel
+      - 'ci/**'
   workflow_dispatch:
     inputs:
       mode:
