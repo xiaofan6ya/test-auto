@@ -206,6 +206,56 @@ jobs:
             exit 1
           fi
 
+      - name: 自检 vermagic（用本树编一个测试模块，读它的 vermagic）
+        if: ${{ github.event.inputs.mode != 'check' }}
+        run: |
+          cd kernel
+          export PATH="$TCBIN:$PATH"
+          TM="$GITHUB_WORKSPACE/testmod"
+          mkdir -p "$TM"
+          cat > "$TM/Makefile" <<'EOF'
+          obj-m := testmod.o
+          EOF
+          cat > "$TM/testmod.c" <<'EOF'
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          static int __init tm_init(void) { return 0; }
+          static void __exit tm_exit(void) { }
+          module_init(tm_init);
+          module_exit(tm_exit);
+          MODULE_LICENSE("GPL");
+          EOF
+          echo "===== 用本树编测试模块 ====="
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-gnu- M="$TM" modules -j$(nproc) 2>&1 | tail -15 || true
+          echo
+          echo "===== 测试模块的 vermagic（本树生成值）====="
+          modinfo -F vermagic "$TM/testmod.ko" 2>/dev/null || true
+          strings -a "$TM/testmod.ko" | grep -a 'vermagic=' || true
+          echo
+          echo "===== 目标值 ====="
+          echo "$TARGET_VERMAGIC"
+          echo
+          echo "===== 内核镜像里 vermagic 相关串 ====="
+          for s in "SMP preempt" "mod_unload" "modversions" "version magic"; do
+            echo "  Image  [$s] = $(strings -a out/arch/arm64/boot/Image | grep -c "$s" || true)"
+            echo "  vmlinux[$s] = $(strings -a out/vmlinux | grep -c "$s" || true)"
+          done
+          echo
+          echo "===== 测试模块能否被本内核接受（vermagic 比对）====="
+          python3 - "$TM/testmod.ko" "$TARGET_VERMAGIC" <<'PY'
+          import sys, subprocess
+          ko, target = sys.argv[1], sys.argv[2]
+          try:
+              out = subprocess.run(["modinfo", "-F", "vermagic", ko],
+                                   capture_output=True, text=True).stdout.strip()
+          except Exception as e:
+              out = f"<modinfo failed: {e}>"
+          print("  tree vermagic :", repr(out))
+          print("  target        :", repr(target))
+          print("  match         :", out == target)
+          PY
+
       - name: 诊断 vermagic（vmlinux / Image / autoconf 三处对照）
         if: ${{ github.event.inputs.mode != 'check' }}
         run: |
