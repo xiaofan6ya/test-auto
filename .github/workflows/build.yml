@@ -15,6 +15,14 @@ on:
         description: '覆盖构建目标（留空用 mode 决定）'
         required: false
         default: ''
+      kernel_repo:
+        description: '内核源码仓库（留空用默认小米官方 OSS）'
+        required: false
+        default: ''
+      kernel_branch:
+        description: '内核源码分支（留空用 chopin-r-oss）'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -24,6 +32,8 @@ jobs:
     env:
       ARCH: arm64
       TARGET_VERMAGIC: '4.14.186-gaa24d707761c SMP preempt mod_unload modversions aarch64'
+      KREPO: 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git'
+      KBRANCH: 'chopin-r-oss'
 
     steps:
       - name: 检出
@@ -34,12 +44,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev rsync zip unzip cpio python3
 
-      - name: 拉取 chopin 内核源码（4.14.186 基线）
+      - name: 拉取 chopin 内核源码（小米官方 OSS / 4.14.186）
         run: |
-          git clone --depth 1 --branch S https://github.com/ChopinKernels/kernel_xiaomi_chopin_android_S.git kernel
+          REPO="${{ github.event.inputs.kernel_repo }}"; [ -n "$REPO" ] || REPO="$KREPO"
+          BR="${{ github.event.inputs.kernel_branch }}"; [ -n "$BR" ] || BR="$KBRANCH"
+          echo "源码: $REPO @ $BR"
+          git clone --depth 1 --single-branch --branch "$BR" "$REPO" kernel
           cd kernel
           git log -1 --format='HEAD %H %s'
-          grep -m1 '^VERSION\|^PATCHLEVEL\|^SUBLEVEL' Makefile || true
           make kernelversion
           # 去掉 .git：避免 setlocalversion 给 vermagic 追加 -dirty / +
           rm -rf .git
